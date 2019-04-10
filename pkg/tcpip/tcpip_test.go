@@ -122,26 +122,6 @@ func TestSubnetCreation(t *testing.T) {
 	}
 }
 
-func TestRouteMatch(t *testing.T) {
-	tests := []struct {
-		d    Address
-		m    AddressMask
-		a    Address
-		want bool
-	}{
-		{"\xc2\x80", "\xff\xf0", "\xc2\x80", true},
-		{"\xc2\x80", "\xff\xf0", "\xc2\x00", false},
-		{"\xc2\x00", "\xff\xf0", "\xc2\x00", true},
-		{"\xc2\x00", "\xff\xf0", "\xc2\x80", false},
-	}
-	for _, tt := range tests {
-		r := Route{Destination: tt.d, Mask: tt.m}
-		if got := r.Match(tt.a); got != tt.want {
-			t.Errorf("Route(%v).Match(%v) = %v, want %v", r, tt.a, got, tt.want)
-		}
-	}
-}
-
 func TestAddressString(t *testing.T) {
 	for _, want := range []string{
 		// Taken from stdlib.
