@@ -56,8 +56,8 @@ type ExecArgs struct {
 
 	// MountNamespace is the mount namespace to execute the new process in.
 	// A reference on MountNamespace must be held for the lifetime of the
-	// ExecArgs. If MountNamespace is nil, it will default to the kernel's
-	// root MountNamespace.
+	// ExecArgs. If MountNamespace is nil, it will default to the init
+	// process's MountNamespace.
 	MountNamespace *fs.MountNamespace
 
 	// Root defines the root directory for the new process. A reference on
@@ -180,7 +180,7 @@ func (proc *Proc) execAsync(args *ExecArgs) (*kernel.ThreadGroup, kernel.ThreadI
 		paths := fs.GetPath(initArgs.Envv)
 		mns := initArgs.MountNamespace
 		if mns == nil {
-			mns = proc.Kernel.RootMountNamespace()
+			mns = proc.Kernel.GlobalInit().Leader().MountNamespace()
 		}
 		f, err := mns.ResolveExecutablePath(ctx, initArgs.WorkingDirectory, initArgs.Argv[0], paths)
 		if err != nil {

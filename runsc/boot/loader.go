@@ -521,12 +521,15 @@ func (l *Loader) run() error {
 		// cid for root container can be empty. Only subcontainers need it to set
 		// the mount location.
 		mntr := newContainerMounter(l.spec, "", l.goferFDs, l.k, l.mountHints)
-		if err := mntr.setupFS(ctx, l.conf, &l.rootProcArgs, l.rootProcArgs.Credentials); err != nil {
+
+		// Setup the root container.
+		if err := mntr.setupRootContainer(ctx, ctx, l.conf, func(mns *fs.MountNamespace) {
+			l.rootProcArgs.MountNamespace = mns
+		}); err != nil {
 			return err
 		}
 
-		rootCtx := l.rootProcArgs.NewContext(l.k)
-		if err := setExecutablePath(rootCtx, &l.rootProcArgs); err != nil {
+		if err := setExecutablePath(ctx, &l.rootProcArgs); err != nil {
 			return err
 		}
 
@@ -540,7 +543,7 @@ func (l *Loader) run() error {
 			}
 		}
 		if !hasHomeEnvv {
-			homeDir, err := getExecUserHome(rootCtx, l.rootProcArgs.MountNamespace, uint32(l.rootProcArgs.Credentials.RealKUID))
+			homeDir, err := getExecUserHome(ctx, l.rootProcArgs.MountNamespace, uint32(l.rootProcArgs.Credentials.RealKUID))
 			if err != nil {
 				return fmt.Errorf("error reading exec user: %v", err)
 			}
@@ -659,7 +662,7 @@ func (l *Loader) startContainer(spec *specs.Spec, conf *Config, cid string, file
 	}
 
 	mntr := newContainerMounter(spec, cid, goferFDs, l.k, l.mountHints)
-	if err := mntr.setupFS(ctx, conf, &procArgs, creds); err != nil {
+	if err := mntr.setupChildContainer(conf, &procArgs); err != nil {
 		return fmt.Errorf("configuring container FS: %v", err)
 	}
 
