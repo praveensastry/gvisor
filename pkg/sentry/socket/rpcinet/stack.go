@@ -30,6 +30,7 @@ import (
 type Stack struct {
 	interfaces     map[int32]inet.Interface
 	interfaceAddrs map[int32][]inet.InterfaceAddr
+	routes         []inet.Route
 	rpcConn        *conn.RPCConnection
 	notifier       *notifier.Notifier
 }
@@ -65,6 +66,16 @@ func NewStack(fd int32) (*Stack, error) {
 	}
 
 	e = hostinet.ExtractHostInterfaces(links, addrs, stack.interfaces, stack.interfaceAddrs)
+	if e != nil {
+		return nil, e
+	}
+
+	routes, err := stack.DoNetlinkRouteRequest(syscall.RTM_GETROUTE)
+	if err != nil {
+		return nil, fmt.Errorf("RTM_GETROUTE failed: %v", err)
+	}
+
+	stack.routes, e = hostinet.ExtractHostRoutes(routes)
 	if e != nil {
 		return nil, e
 	}
@@ -132,4 +143,9 @@ func (s *Stack) TCPSACKEnabled() (bool, error) {
 // SetTCPSACKEnabled implements inet.Stack.SetTCPSACKEnabled.
 func (s *Stack) SetTCPSACKEnabled(enabled bool) error {
 	panic("rpcinet handles procfs directly this method should not be called")
+}
+
+// RouteTable implements inet.Stack.RouteTable.
+func (s *Stack) RouteTable() []inet.Route {
+	return s.routes
 }

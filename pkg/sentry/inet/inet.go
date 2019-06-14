@@ -49,6 +49,9 @@ type Stack interface {
 	// SetTCPSACKEnabled attempts to change TCP selective acknowledgement
 	// settings.
 	SetTCPSACKEnabled(enabled bool) error
+
+	// RouteTable returns the
+	RouteTable() []Route
 }
 
 // Interface contains information about a network interface.
@@ -101,4 +104,51 @@ type TCPBufferSize struct {
 
 	// Max is the maximum size.
 	Max int
+}
+
+// Route contains information about a network route.
+type Route struct {
+	// Keep these fields sorted in the order they appear in rtnetlink(7).
+
+	// Family is the address family, a Linux AF_* constant.
+	Family uint8
+
+	// DstLen is the length of the destination address.
+	DstLen uint8
+
+	// SrcLen is the length of the source address.
+	SrcLen uint8
+
+	// Tos is the TOS filter
+	Tos uint8
+
+	// Table is the routing table ID.
+	Table uint8
+
+	// Protocol is the route origin, a Linux RTPROT_* constant.
+	Protocol uint8
+
+	// Scope is the distance to destination, a Linux RT_SCOPE_* constant.
+	Scope uint8
+
+	// Type is the route origin, a Linux RTN_* constant.
+	Type uint8
+
+	// Flags are route flags. See rtnetlink(7) under "rtm_flags".
+	Flags uint32
+
+	// DstAddr is the route destination address (RTA_DST).
+	DstAddr []byte
+
+	// SrcAddr is the route source address (RTA_SRC).
+	SrcAddr []byte
+
+	// OutputInterface is the output interface index (RTA_OIF)
+	OutputInterface int32
+
+	// GatewayAddr is the route gateway address (RTA_GATEWAY).
+	GatewayAddr []byte
+
+	// Metrics is the route metric (RTA_METRICS)
+	Metrics int32
 }

@@ -189,3 +189,121 @@ const (
 const (
 	ARPHRD_LOOPBACK = 772
 )
+
+// RouteMessage struct rtmsg, from uapi/linux/rtnetlink.h
+type RouteMessage struct {
+	Family uint8
+	DstLen uint8
+	SrcLen uint8
+	Tos    uint8
+
+	Table    uint8
+	Protocol uint8
+	Scope    uint8
+	Type     uint8
+
+	Flags uint32
+}
+
+// Route types, from uapi/linux/rtnetlink.h
+const (
+	RTN_UNSPEC      = 0
+	RTN_UNICAST     = 1  // Gateway or direct route
+	RTN_LOCAL       = 2  // Accept locally
+	RTN_BROADCAST   = 3  // Accept locally as broadcast, send as broadcast
+	RTN_ANYCAST     = 6  // Accept locally as broadcast, but send as unicast
+	RTN_MULTICAST   = 5  // Multicast route
+	RTN_BLACKHOLE   = 6  // Drop
+	RTN_UNREACHABLE = 7  // Destination is unreachable
+	RTN_PROHIBIT    = 8  // Administratively prohibited
+	RTN_THROW       = 9  // Not in this table
+	RTN_NAT         = 10 // Translate this address
+	RTN_XRESOLVE    = 11 // Use external resolver
+)
+
+// Route protocols/origins, from uapi/linux/rtnetlink.h
+const (
+	RTPROT_UNSPEC   = 0
+	RTPROT_REDIRECT = 1   // Route installed by ICMP redirects
+	RTPROT_KERNEL   = 2   // Route installed by kernel
+	RTPROT_BOOT     = 3   // Route installed during boot
+	RTPROT_STATIC   = 4   // Route installed by administrator
+	RTPROT_GATED    = 8   // Apparently, GateD
+	RTPROT_RA       = 9   // RDISC/ND router advertisements
+	RTPROT_MRT      = 10  // Merit MRT
+	RTPROT_ZEBRA    = 11  // Zebra
+	RTPROT_BIRD     = 12  // BIRD
+	RTPROT_DNROUTED = 13  // DECnet routing daemon
+	RTPROT_XORP     = 14  // XORP
+	RTPROT_NTK      = 15  // Netsukuku
+	RTPROT_DHCP     = 16  // DHCP client
+	RTPROT_MROUTED  = 17  // Multicast daemon
+	RTPROT_BABEL    = 42  // Babel daemon
+	RTPROT_BGP      = 186 // BGP Routes
+	RTPROT_ISIS     = 187 // ISIS Routes
+	RTPROT_OSPF     = 188 // OSPF Routes
+	RTPROT_RIP      = 189 // RIP Routes
+	RTPROT_EIGRP    = 192 // EIGRP Routes
+)
+
+// Route scopes, from uapi/linux/rtnetlink.h
+const (
+	RT_SCOPE_UNIVERSE = 0   // global route
+	RT_SCOPE_SITE     = 200 // interior route in the local autonomous system
+	RT_SCOPE_LINK     = 253 // route on this link
+	RT_SCOPE_HOST     = 254 // route on the local host
+	RT_SCOPE_NOWHERE  = 255 // destination doesn't exist
+)
+
+// Route flags, from uapi/linux/rtnetlink.h
+const (
+	RTM_F_NOTIFY       = 0x100
+	RTM_F_CLONED       = 0x200
+	RTM_F_EQUALIZE     = 0x400
+	RTM_F_PREFIX       = 0x800
+	RTM_F_LOOKUP_TABLE = 0x1000
+	RTM_F_FIB_MATCH    = 0x2000
+)
+
+// Route tables, from uapi/linux/rtnetlink.h
+const (
+	RT_TABLE_UNSPEC  = 0
+	RT_TABLE_COMPAT  = 252
+	RT_TABLE_DEFAULT = 253
+	RT_TABLE_MAIN    = 254
+	RT_TABLE_LOCAL   = 255
+)
+
+// Route attributes, from uapi/linux/rtnetlink.h
+const (
+	RTA_UNSPEC        = 0
+	RTA_DST           = 1
+	RTA_SRC           = 2
+	RTA_IIF           = 3
+	RTA_OIF           = 4
+	RTA_GATEWAY       = 5
+	RTA_PRIORITY      = 6
+	RTA_PREFSRC       = 7
+	RTA_METRICS       = 8
+	RTA_MULTIPATH     = 9
+	RTA_PROTOINFO     = 10 // no longer used
+	RTA_FLOW          = 11
+	RTA_CACHEINFO     = 12
+	RTA_SESSION       = 13 // no longer used
+	RTA_MP_ALGO       = 14 // no longer used
+	RTA_TABLE         = 15
+	RTA_MARK          = 16
+	RTA_MFC_STATS     = 17
+	RTA_VIA           = 18
+	RTA_NEWDST        = 19
+	RTA_PREF          = 20
+	RTA_ENCAP_TYPE    = 21
+	RTA_ENCAP         = 22
+	RTA_EXPIRES       = 23
+	RTA_PAD           = 24
+	RTA_UID           = 25
+	RTA_TTL_PROPAGATE = 26
+	RTA_IP_PROTO      = 27
+	RTA_SPORT         = 28
+	RTA_DPORT         = 29
+)

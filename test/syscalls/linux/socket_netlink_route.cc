@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <arpa/inet.h>
 #include <ifaddrs.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
@@ -423,6 +424,92 @@ TEST(NetlinkRouteTest, LookupAll) {
     count++;
   }
   ASSERT_GT(count, 0);
+}
+
+// Validates the reponses to RTM_GETROUTE + NLM_F_DUMP.
+void CheckGetRouteResponse(const struct nlmsghdr* hdr, int seq, int port) {
+  EXPECT_THAT(hdr->nlmsg_type, AnyOf(Eq(RTM_NEWROUTE), Eq(NLMSG_DONE)));
+
+  EXPECT_TRUE((hdr->nlmsg_flags & NLM_F_MULTI) == NLM_F_MULTI)
+      << std::hex << hdr->nlmsg_flags;
+
+  EXPECT_EQ(hdr->nlmsg_seq, seq);
+  EXPECT_EQ(hdr->nlmsg_pid, port);
+
+  if (hdr->nlmsg_type != RTM_NEWROUTE) {
+    return;
+  }
+
+  // RTM_NEWROUTE contains at least the header and rtmsg.
+  EXPECT_GE(hdr->nlmsg_len, NLMSG_SPACE(sizeof(struct rtmsg)));
+
+  // TODO(ianlewis): Check rtmsg contents and following attrs.
+}
+
+// GetRouteDump tests a RTM_GETROUTE + NLM_F_DUMP request.
+TEST(NetlinkRouteTest, GetRouteDump) {
+  FileDescriptor fd = ASSERT_NO_ERRNO_AND_VALUE(NetlinkBoundSocket());
+  uint32_t port = ASSERT_NO_ERRNO_AND_VALUE(NetlinkPortID(fd.get()));
+
+  struct request {
+    struct nlmsghdr hdr;
+    struct rtmsg rtm;
+  };
+
+  constexpr uint32_t kSeq = 12345;
+
+  struct request req = {};
+  req.hdr.nlmsg_len = sizeof(req);
+  req.hdr.nlmsg_type = RTM_GETROUTE;
+  req.hdr.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+  req.hdr.nlmsg_seq = kSeq;
+  req.rtm.rtm_family = AF_UNSPEC;
+
+  bool routeFound = false;
+  bool dstFound = true;
+  ASSERT_NO_ERRNO(NetlinkRequestResponse(
+      fd, &req, sizeof(req), [&](const struct nlmsghdr* hdr) {
+        CheckGetRouteResponse(hdr, kSeq, port);
+        if (hdr->nlmsg_type != RTM_NEWROUTE) {
+          return;
+        }
+        ASSERT_GE(hdr->nlmsg_len, NLMSG_SPACE(sizeof(struct rtmsg)));
+        const struct rtmsg* msg =
+            reinterpret_cast<const struct rtmsg*>(NLMSG_DATA(hdr));
+        // NOTE: rtmsg fields are char fields.
+        std::cout << "Found route table=" << (int)msg->rtm_table
+                  << ", protocol=" << (int)msg->rtm_protocol
+                  << ", scope=" << (int)msg->rtm_scope
+                  << ", type=" << (int)msg->rtm_type;
+
+        struct rtattr* attr;
+        int len = RTM_PAYLOAD(hdr);
+        char address[32];
+        bool rtDstFound = false;
+        for (attr = RTM_RTA(msg); RTA_OK(attr, len);
+             attr = RTA_NEXT(attr, len)) {
+          switch (attr->rta_type) {
+            case RTA_DST:
+              inet_ntop(AF_INET, RTA_DATA(attr), address, sizeof(address));
+              std::cout << ", dst=" << address;
+              rtDstFound = true;
+              break;
+            default:
+              break;
+          }
+        }
+
+        std::cout << "\n";
+
+        if (msg->rtm_table == RT_TABLE_MAIN) {
+          routeFound = true;
+          dstFound = rtDstFound && dstFound;
+        }
+      }));
+  // At least one route found in main route table.
+  EXPECT_TRUE(routeFound);
+  // Found RTA_DST for each route in main table.
+  EXPECT_TRUE(dstFound);
 }
 
 }  // namespace

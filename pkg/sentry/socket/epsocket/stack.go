@@ -19,6 +19,7 @@ import (
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/syserr"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv4"
 	"gvisor.dev/gvisor/pkg/tcpip/network/ipv6"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -137,4 +138,42 @@ func (s *Stack) TCPSACKEnabled() (bool, error) {
 // SetTCPSACKEnabled implements inet.Stack.SetTCPSACKEnabled.
 func (s *Stack) SetTCPSACKEnabled(enabled bool) error {
 	return syserr.TranslateNetstackError(s.Stack.SetTransportProtocolOption(tcp.ProtocolNumber, tcp.SACKEnabled(enabled))).ToError()
+}
+
+// RouteTable implements inet.Stack.RouteTable.
+func (s *Stack) RouteTable() []inet.Route {
+	routeTable := []inet.Route{}
+
+	for _, rt := range s.Stack.GetRouteTable() {
+		var family uint8
+		switch len(rt.Destination) {
+		case header.IPv4AddressSize:
+			family = linux.AF_INET
+		case header.IPv6AddressSize:
+			family = linux.AF_INET6
+		default:
+			log.Warningf("Unknown network protocol in %+v", rt)
+			continue
+		}
+
+		dest := []byte(rt.Destination)
+		routeTable = append(routeTable, inet.Route{
+			Family: family,
+			DstLen: uint8(len(dest) * 8),
+
+			// Always return unspecified protocol since we have no notion of
+			// protocol for routes.
+			Protocol: linux.RTPROT_UNSPEC,
+			// FIXME: Always link scope?
+			Scope: linux.RT_SCOPE_LINK,
+			// FIXME: Route type always unicast?
+			Type: linux.RTN_UNICAST,
+
+			DstAddr:         dest,
+			OutputInterface: int32(rt.NIC),
+			GatewayAddr:     []byte(rt.Gateway),
+		})
+	}
+
+	return routeTable
 }
