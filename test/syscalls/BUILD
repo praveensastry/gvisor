@@ -436,7 +436,9 @@ syscall_test(
 )
 
 syscall_test(
-    size = "medium",
+    size = "large",
+    parallel = False,
+    shard_count = 10,
     test = "//test/syscalls/linux:socket_inet_loopback_test",
 )
 

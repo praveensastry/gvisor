@@ -366,6 +366,11 @@ type endpoint struct {
 	// read by Accept() calls.
 	acceptedChan chan *endpoint `state:".([]*endpoint)"`
 
+	// pendingAccepted is a synchronization primitive used to track number
+	// of connections that are queued up to be delivered to the accepted
+	// channel.
+	pendingAccepted sync.WaitGroup `state:"nosave"`
+
 	// The following are only used from the protocol goroutine, and
 	// therefore don't need locks to protect them.
 	rcv *receiver `state:"wait"`
@@ -374,7 +379,11 @@ type endpoint struct {
 	// The goroutine drain completion notification channel.
 	drainDone chan struct{} `state:"nosave"`
 
-	// The goroutine undrain notification channel.
+	// The goroutine undrain notification channel. This is currently used as
+	// a way to block the worker goroutines. Today nothing closes/writes
+	// this channel and this causes any goroutines waiting on this to just
+	// block. This is used during save/restore to prevent worker goroutines
+	// from mutating state as it's being saved.
 	undrain chan struct{} `state:"nosave"`
 
 	// probe if not nil is invoked on every received segment. It is passed
@@ -574,6 +583,25 @@ func (e *endpoint) Close() {
 	e.mu.Unlock()
 }
 
+// closePendingAcceptableConnections closes all connections that have completed
+// handshake but not yet been delivered to the application.
+func (e *endpoint) closePendingAcceptableConnectionsLocked() {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for n := range e.acceptedChan {
+			n.mu.Lock()
+			n.resetConnectionLocked(tcpip.ErrConnectionAborted)
+			n.mu.Unlock()
+			n.Close()
+		}
+	}()
+	e.pendingAccepted.Wait()
+	close(e.acceptedChan)
+	<-done
+	e.acceptedChan = nil
+}
+
 // cleanupLocked frees all resources associated with the endpoint. It is called
 // after Close() is called and the worker goroutine (if any) is done with its
 // work.
@@ -581,14 +609,7 @@ func (e *endpoint) cleanupLocked() {
 	// Close all endpoints that might have been accepted by TCP but not by
 	// the client.
 	if e.acceptedChan != nil {
-		close(e.acceptedChan)
-		for n := range e.acceptedChan {
-			n.mu.Lock()
-			n.resetConnectionLocked(tcpip.ErrConnectionAborted)
-			n.mu.Unlock()
-			n.Close()
-		}
-		e.acceptedChan = nil
+		e.closePendingAcceptableConnectionsLocked()
 	}
 	e.workerCleanup = false
 
