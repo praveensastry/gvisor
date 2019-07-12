@@ -641,6 +641,8 @@ syscall_test(
 
 syscall_test(test = "//test/syscalls/linux:uidgid_test")
 
+syscall_test(test = "//test/syscalls/linux:socket_bind_to_device_test")
+
 syscall_test(test = "//test/syscalls/linux:uname_test")
 
 syscall_test(
