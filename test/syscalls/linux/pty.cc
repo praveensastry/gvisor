@@ -13,13 +13,17 @@
 // limitations under the License.
 
 #include <fcntl.h>
+#include <linux/capability.h>
 #include <linux/major.h>
 #include <poll.h>
+#include <sched.h>
+#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -31,8 +35,10 @@
 #include "absl/synchronization/notification.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "test/util/capability_util.h"
 #include "test/util/file_descriptor.h"
 #include "test/util/posix_error.h"
+#include "test/util/pty_util.h"
 #include "test/util/test_util.h"
 #include "test/util/thread_util.h"
 
@@ -368,25 +374,6 @@ PosixErrorOr<size_t> PollAndReadFd(int fd, void* buf, size_t count,
     return completed;
   }
   return PosixError(ETIMEDOUT, "Poll timed out");
-}
-
-// Opens the slave end of the passed master as R/W and nonblocking.
-PosixErrorOr<FileDescriptor> OpenSlave(const FileDescriptor& master) {
-  // Get pty index.
-  int n;
-  int ret = ioctl(master.get(), TIOCGPTN, &n);
-  if (ret < 0) {
-    return PosixError(errno, "ioctl(TIOCGPTN) failed");
-  }
-
-  // Unlock pts.
-  int unlock = 0;
-  ret = ioctl(master.get(), TIOCSPTLCK, &unlock);
-  if (ret < 0) {
-    return PosixError(errno, "ioctl(TIOSPTLCK) failed");
-  }
-
-  return Open(absl::StrCat("/dev/pts/", n), O_RDWR | O_NONBLOCK);
 }
 
 TEST(BasicPtyTest, StatUnopenedMaster) {
@@ -1231,6 +1218,326 @@ TEST_F(PtyTest, SetMasterWindowSize) {
               SyscallSucceeds());
   EXPECT_EQ(retrieved_ws.ws_row, kRows);
   EXPECT_EQ(retrieved_ws.ws_col, kCols);
+}
+
+class JobControlTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    master_ = ASSERT_NO_ERRNO_AND_VALUE(Open("/dev/ptmx", O_RDWR | O_NONBLOCK));
+    slave_ = ASSERT_NO_ERRNO_AND_VALUE(OpenSlave(master_));
+
+    // Make this a session leader, which also drops the controlling terminal.
+    // In the gVisor test environment, this test will be run as the session
+    // leader already (as the sentry init process).
+    if (!IsRunningOnGvisor()) {
+      ASSERT_THAT(setsid(), SyscallSucceeds());
+    }
+  }
+
+  // Master and slave ends of the PTY. Non-blocking.
+  FileDescriptor master_;
+  FileDescriptor slave_;
+};
+
+// You can make set the master as your controlling terminal.
+TEST_F(JobControlTest, SetTTYMaster) {
+  ASSERT_THAT(ioctl(master_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+}
+
+TEST_F(JobControlTest, SetTTY) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+}
+
+TEST_F(JobControlTest, SetTTYNonLeader) {
+  // Fork a process that won't be the session leader.
+  pid_t child = fork();
+  if (!child) {
+    if (!ioctl(slave_.get(), TIOCSCTTY, 0)) {
+      // We were able to set the terminal -- that's wrong.
+      _exit(1);
+    }
+    _exit(0);
+  }
+
+  int wstatus;
+  ASSERT_THAT(waitpid(child, &wstatus, 0), SyscallSucceedsWithValue(child));
+  ASSERT_EQ(wstatus, 0);
+}
+
+TEST_F(JobControlTest, SetTTYBadArg) {
+  // Despite the man page saying arg should be 0 here, Linux doesn't actually
+  // check.
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 1), SyscallSucceeds());
+}
+
+TEST_F(JobControlTest, SetTTYDifferentSession) {
+  SKIP_IF(ASSERT_NO_ERRNO_AND_VALUE(HaveCapability(CAP_SYS_ADMIN)));
+
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  // Fork, join a new session, and try to steal the parent's controlling
+  // terminal, which should fail.
+  pid_t child = fork();
+  if (!child) {
+    if (setsid() < 0) {
+      _exit(1);
+    }
+    if (!ioctl(slave_.get(), TIOCSCTTY, 0)) {
+      // We were able to steal the terminal -- that's wrong.
+      _exit(2);
+    }
+    _exit(0);
+  }
+
+  int wstatus;
+  ASSERT_THAT(waitpid(child, &wstatus, 0), SyscallSucceedsWithValue(child));
+  ASSERT_EQ(wstatus, 0);
+}
+
+TEST_F(JobControlTest, ReleaseTTY) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  ASSERT_THAT(ioctl(slave_.get(), TIOCNOTTY), SyscallSucceeds());
+}
+
+TEST_F(JobControlTest, ReleaseUnsetTTY) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCNOTTY), SyscallFailsWithErrno(ENOTTY));
+}
+
+TEST_F(JobControlTest, ReleaseWrongTTY) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  ASSERT_THAT(ioctl(master_.get(), TIOCNOTTY), SyscallFailsWithErrno(ENOTTY));
+}
+
+TEST_F(JobControlTest, ReleaseTTYNonLeader) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  pid_t child = fork();
+  if (!child) {
+    if (ioctl(slave_.get(), TIOCNOTTY)) {
+      // We weren't able to release the terminal -- that's wrong.
+      _exit(1);
+    }
+    _exit(0);
+  }
+
+  int wstatus;
+  ASSERT_THAT(waitpid(child, &wstatus, 0), SyscallSucceedsWithValue(child));
+  ASSERT_EQ(wstatus, 0);
+}
+
+TEST_F(JobControlTest, ReleaseTTYDifferentSession) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  pid_t child = fork();
+  if (!child) {
+    // Join a new session, then try to disconnect.
+    if (setsid() < 0) {
+      _exit(1);
+    }
+    if (!ioctl(slave_.get(), TIOCNOTTY)) {
+      // We were able to release the terminal -- that's wrong.
+      _exit(2);
+    }
+    _exit(0);
+  }
+
+  int wstatus;
+  ASSERT_THAT(waitpid(child, &wstatus, 0), SyscallSucceedsWithValue(child));
+  ASSERT_EQ(wstatus, 0);
+}
+
+// Used by the child process spawned in ReleaseTTYSignals to track received
+// signals.
+static int received;
+
+void sig_handler(int signum) { received |= signum; }
+
+// When the session leader releases its controlling terminal, the foreground
+// process group gets SIGHUP, then SIGCONT. This test:
+// - Spawns 2 threads
+// - Has thread 1 return 0 if it gets both SIGHUP and SIGCONT
+// - Has thread 2 leave the foreground process group, and return non-zero if it
+//   receives any signals.
+// - Has the parent thread release its controlling terminal
+// - Checks that thread 1 got both signals
+// - Checks that thread 2 didn't get any signals.
+TEST_F(JobControlTest, ReleaseTTYSignals) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  received = 0;
+  struct sigaction sa = {
+      .sa_handler = sig_handler,
+      .sa_flags = 0,
+  };
+  sigemptyset(&sa.sa_mask);
+  sigaddset(&sa.sa_mask, SIGHUP);
+  sigaddset(&sa.sa_mask, SIGCONT);
+  sigprocmask(SIG_BLOCK, &sa.sa_mask, NULL);
+
+  pid_t same_pgrp_child = fork();
+  if (!same_pgrp_child) {
+    // The child will wait for SIGHUP and SIGCONT, then return 0. It begins with
+    // SIGHUP and SIGCONT blocked. We install signal handlers for those signals,
+    // then use sigsuspend to wait for those specific signals.
+    if (sigaction(SIGHUP, &sa, NULL)) {
+      _exit(1);
+    }
+    if (sigaction(SIGCONT, &sa, NULL)) {
+      _exit(2);
+    }
+    sigset_t mask;
+    sigfillset(&mask);
+    sigdelset(&mask, SIGHUP);
+    sigdelset(&mask, SIGCONT);
+    while (received != (SIGHUP | SIGCONT)) {
+      sigsuspend(&mask);
+    }
+    _exit(0);
+  }
+
+  // We don't want to block these anymore.
+  sigprocmask(SIG_UNBLOCK, &sa.sa_mask, NULL);
+
+  // This child will return non-zero if either SIGHUP or SIGCONT are received.
+  pid_t diff_pgrp_child = fork();
+  if (!diff_pgrp_child) {
+    if (setpgid(0, 0)) {
+      _exit(1);
+    }
+    pause();
+    _exit(2);
+  }
+
+  // Release the controlling terminal, sending SIGHUP and SIGCONT to all other
+  // processes in this process group.
+  ASSERT_THAT(ioctl(slave_.get(), TIOCNOTTY), SyscallSucceeds());
+
+  // The child in the same process group will get signaled.
+  int wstatus;
+  EXPECT_THAT(waitpid(same_pgrp_child, &wstatus, 0),
+              SyscallSucceedsWithValue(same_pgrp_child));
+  EXPECT_EQ(wstatus, 0);
+
+  // The other child will not get signaled.
+  EXPECT_THAT(waitpid(diff_pgrp_child, &wstatus, WNOHANG),
+              SyscallSucceedsWithValue(0));
+  EXPECT_THAT(kill(diff_pgrp_child, SIGKILL), SyscallSucceeds());
+}
+
+TEST_F(JobControlTest, GetForegroundProcessGroup) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+  pid_t foreground_pgid;
+  pid_t pid;
+  ASSERT_THAT(ioctl(slave_.get(), TIOCGPGRP, &foreground_pgid),
+              SyscallSucceeds());
+  ASSERT_THAT(pid = getpid(), SyscallSucceeds());
+
+  ASSERT_EQ(foreground_pgid, pid);
+}
+
+TEST_F(JobControlTest, GetForegroundProcessGroupNonControlling) {
+  // At this point there's no controlling terminal, so TIOCGPGRP should fail.
+  pid_t foreground_pgid;
+  ASSERT_THAT(ioctl(slave_.get(), TIOCGPGRP, &foreground_pgid),
+              SyscallFailsWithErrno(ENOTTY));
+}
+
+TEST_F(JobControlTest, SetForegroundProcessGroup) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  // Create a new process, put it in a new process group, make that group the
+  // foreground process group, then have the process wait.
+  pid_t child = fork();
+  if (!child) {
+    if (setpgid(0, 0)) {
+      _exit(1);
+    }
+    pause();
+    _exit(0);
+  }
+
+  // Repeatedly attempt to change the foreground process group. This will
+  // succeed once the child has called setpgid().
+  while (true) {
+    if (ioctl(slave_.get(), TIOCSPGRP, child)) {
+      break;
+    }
+    sched_yield();
+  }
+
+  // Signal the child, wait for it to exit, then retake the terminal.
+  ASSERT_THAT(kill(child, SIGKILL), SyscallSucceeds());
+  int wstatus;
+  ASSERT_THAT(waitpid(child, &wstatus, 0), SyscallSucceedsWithValue(child));
+  pid_t pid = getpid();
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSPGRP, &pid), SyscallSucceeds());
+}
+
+TEST_F(JobControlTest, SetForegroundProcessGroupWrongTTY) {
+  pid_t pid = getpid();
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSPGRP, &pid),
+              SyscallFailsWithErrno(ENOTTY));
+}
+
+TEST_F(JobControlTest, SetForegroundProcessGroupNegPgid) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  pid_t pid = -1;
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSPGRP, &pid),
+              SyscallFailsWithErrno(EINVAL));
+}
+
+TEST_F(JobControlTest, SetForegroundProcessGroupEmptyProcessGroup) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  // Create a new process, put it in a new process group, make that group the
+  // foreground process group, then have the process wait.
+  pid_t child = fork();
+  if (!child) {
+    if (setpgid(0, 0)) {
+      _exit(1);
+    }
+    _exit(0);
+  }
+
+  // Wait for the child to exit.
+  int wstatus;
+  EXPECT_THAT(waitpid(child, &wstatus, 0), SyscallSucceedsWithValue(child));
+  // The child's process group doesn't exist anymore - this should fail.
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSPGRP, &child),
+              SyscallFailsWithErrno(ESRCH));
+}
+
+TEST_F(JobControlTest, SetForegroundProcessGroupDifferentSession) {
+  ASSERT_THAT(ioctl(slave_.get(), TIOCSCTTY, 0), SyscallSucceeds());
+
+  // Create a new process and put it in a new session.
+  pid_t child = fork();
+  if (!child) {
+    if (setsid() < 0) {
+      _exit(1);
+    }
+    // Tell the parent we're in a new session.
+    if (raise(SIGSTOP)) {
+      _exit(2);
+    }
+    pause();
+    _exit(3);
+  }
+
+  // Wait for the child to tell us it's in a new session.
+  int wstatus;
+  EXPECT_THAT(waitpid(child, &wstatus, WUNTRACED),
+              SyscallSucceedsWithValue(child));
+  EXPECT_TRUE(WSTOPSIG(wstatus));
+
+  // Child is in a new session, so we can't make it the foregroup process group.
+  EXPECT_THAT(ioctl(slave_.get(), TIOCSPGRP, &child),
+              SyscallFailsWithErrno(EPERM));
+
+  EXPECT_THAT(kill(child, SIGKILL), SyscallSucceeds());
 }
 
 }  // namespace

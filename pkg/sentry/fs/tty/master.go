@@ -172,6 +172,13 @@ func (mf *masterFileOperations) Ioctl(ctx context.Context, _ *fs.File, io userme
 		return 0, mf.t.ld.windowSize(ctx, io, args)
 	case linux.TIOCSWINSZ:
 		return 0, mf.t.ld.setWindowSize(ctx, io, args)
+	case linux.TIOCSCTTY:
+		// Make the given terminal the controlling terminal of the
+		// calling process.
+		return 0, mf.t.setControllingTTY(ctx, io, args, true /* isMaster */)
+	case linux.TIOCNOTTY:
+		// Release this process's controlling terminal.
+		return 0, mf.t.releaseControllingTTY(ctx, io, args, true /* isMaster */)
 	default:
 		maybeEmitUnimplementedEvent(ctx, cmd)
 		return 0, syserror.ENOTTY
@@ -200,8 +207,6 @@ func maybeEmitUnimplementedEvent(ctx context.Context, cmd uint32) {
 		linux.TIOCEXCL,
 		linux.TIOCNXCL,
 		linux.TIOCGEXCL,
-		linux.TIOCNOTTY,
-		linux.TIOCSCTTY,
 		linux.TIOCGSID,
 		linux.TIOCGETD,
 		linux.TIOCVHANGUP,
