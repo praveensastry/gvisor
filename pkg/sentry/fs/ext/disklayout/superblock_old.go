@@ -15,7 +15,7 @@
 package disklayout
 
 // SuperBlockOld implements SuperBlock and represents the old version of the
-// superblock struct in ext2 and ext3 systems.
+// superblock struct. Should be used only if RevLevel = OldRev.
 type SuperBlockOld struct {
 	InodesCountRaw      uint32
 	BlocksCountLo       uint32
@@ -81,7 +81,7 @@ func (sb *SuperBlockOld) ClusterSize() uint64 { return 1 << (10 + sb.LogClusterS
 func (sb *SuperBlockOld) ClustersPerGroup() uint32 { return sb.ClustersPerGroupRaw }
 
 // InodeSize implements SuperBlock.InodeSize.
-func (sb *SuperBlockOld) InodeSize() uint16 { return oldInodeSize }
+func (sb *SuperBlockOld) InodeSize() uint16 { return OldInodeSize }
 
 // InodesPerGroup implements SuperBlock.InodesPerGroup.
 func (sb *SuperBlockOld) InodesPerGroup() uint32 { return sb.InodesPerGroupRaw }
