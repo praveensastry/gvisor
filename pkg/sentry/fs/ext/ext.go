@@ -16,86 +16,80 @@
 package ext
 
 import (
+	"errors"
+	"fmt"
 	"io"
-	"sync"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/fd"
+	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs/ext/disklayout"
+	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
-// filesystem implements vfs.FilesystemImpl.
-type filesystem struct {
-	// mu serializes changes to the Dentry tree and the usage of the read seeker.
-	mu sync.Mutex
+// filesystemType implements vfs.FilesystemType.
+type filesystemType struct{}
 
-	// dev is the ReadSeeker for the underlying fs device. It is protected by mu.
-	//
-	// The ext filesystems aim to maximize locality, i.e. place all the data
-	// blocks of a file close together. On a spinning disk, locality reduces the
-	// amount of movement of the head hence speeding up IO operations. On an SSD
-	// there are no moving parts but locality increases the size of each transer
-	// request. Hence, having mutual exclusion on the read seeker while reading a
-	// file *should* help in achieving the intended performance gains.
-	//
-	// Note: This synchronization was not coupled with the ReadSeeker itself
-	// because we want to synchronize across read/seek operations for the
-	// performance gains mentioned above. Helps enforcing one-file-at-a-time IO.
-	dev io.ReadSeeker
+// Compiles only if filesystemType implements vfs.FilesystemType.
+var _ vfs.FilesystemType = (*filesystemType)(nil)
 
-	// inodeCache maps absolute inode numbers to the corresponding Inode struct.
-	// Inodes should be removed from this once their reference count hits 0.
-	//
-	// Protected by mu because every addition and removal from this corresponds to
-	// a change in the dentry tree.
-	inodeCache map[uint32]*inode
+// getDeviceFd returns an io.ReaderAt to the underlying device.
+// Currently there are two ways of mounting an ext(2/3/4) fs:
+//   1. Specify a mount with our internal special MountType in the OCI spec.
+//   2. Expose the device to the container and mount it from application layer.
+func getDeviceFd(source string, opts vfs.NewFilesystemOptions) (io.ReaderAt, error) {
+	if opts.InternalData == nil {
+		// User mount call.
+		// TODO(b/134676337): Open the device specified by `source` and return that.
+		panic("unimplemented")
+	}
 
-	// sb represents the filesystem superblock. Immutable after initialization.
-	sb disklayout.SuperBlock
+	// NewFilesystem call originated from within the sentry.
+	devFd, ok := opts.InternalData.(int)
+	if !ok {
+		return nil, errors.New("internal data for ext fs must be an int containing the file descriptor to device")
+	}
 
-	// bgs represents all the block group descriptors for the filesystem.
-	// Immutable after initialization.
-	bgs []disklayout.BlockGroup
+	if devFd < 0 {
+		return nil, fmt.Errorf("ext device file descriptor is not valid: %d", devFd)
+	}
+
+	// fd.ReadWriter does not take ownership of the file descriptor and hence will
+	// not close it when it is garbage collected.
+	return fd.NewReadWriter(devFd), nil
 }
 
-// newFilesystem is the filesystem constructor.
-func newFilesystem(dev io.ReadSeeker) (*filesystem, error) {
-	fs := filesystem{dev: dev, inodeCache: make(map[uint32]*inode)}
-	var err error
+// NewFilesystem implements vfs.FilesystemType.NewFilesystem.
+func (fstype filesystemType) NewFilesystem(ctx context.Context, creds *auth.Credentials, source string, opts vfs.NewFilesystemOptions) (*vfs.Filesystem, *vfs.Dentry, error) {
+	dev, err := getDeviceFd(source, opts)
+	if err != nil {
+		return nil, nil, err
+	}
 
+	fs := filesystem{dev: dev, inodeCache: make(map[uint32]*inode)}
+	fs.vfsfs.Init(&fs)
 	fs.sb, err = readSuperBlock(dev)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if fs.sb.Magic() != linux.EXT_SUPER_MAGIC {
 		// mount(2) specifies that EINVAL should be returned if the superblock is
 		// invalid.
-		return nil, syserror.EINVAL
+		return nil, nil, syserror.EINVAL
 	}
 
 	fs.bgs, err = readBlockGroups(dev, fs.sb)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return &fs, nil
-}
-
-// getOrCreateInode gets the inode corresponding to the inode number passed in.
-// It creates a new one with the given inode number if one does not exist.
-//
-// Preconditions: must be holding fs.mu.
-func (fs *filesystem) getOrCreateInode(inodeNum uint32) (*inode, error) {
-	if in, ok := fs.inodeCache[inodeNum]; ok {
-		return in, nil
-	}
-
-	in, err := newInode(fs.dev, fs.sb, fs.bgs, inodeNum)
+	rootInode, err := fs.getOrCreateInode(ctx, disklayout.RootDirInode)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	fs.inodeCache[inodeNum] = in
-	return in, nil
+	return &fs.vfsfs, &newDentry(rootInode).vfsd, nil
 }
