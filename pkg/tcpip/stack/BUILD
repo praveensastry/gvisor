@@ -24,6 +24,7 @@ go_library(
         "//pkg/tcpip/buffer",
         "//pkg/tcpip/hash/jenkins",
         "//pkg/tcpip/header",
+        "//pkg/tcpip/iptables",
         "//pkg/tcpip/ports",
         "//pkg/tcpip/seqnum",
         "//pkg/waiter",

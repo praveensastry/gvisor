@@ -15,6 +15,10 @@
 // Package inet defines semantics for IP stacks.
 package inet
 
+import (
+	"gvisor.dev/gvisor/pkg/tcpip/iptables"
+)
+
 // Stack represents a TCP/IP stack.
 type Stack interface {
 	// Interfaces returns all network interfaces as a mapping from interface
@@ -52,6 +56,9 @@ type Stack interface {
 
 	// Statistics reports stack statistics.
 	Statistics(stat interface{}, arg string) error
+
+	// IPTables gets iptables rules from the stack.
+	IPTables() (iptables.IPTables, error)
 }
 
 // Interface contains information about a network interface.

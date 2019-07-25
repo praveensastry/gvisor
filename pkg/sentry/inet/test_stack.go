@@ -14,6 +14,8 @@
 
 package inet
 
+import "gvisor.dev/gvisor/pkg/tcpip/iptables"
+
 // TestStack is a dummy implementation of Stack for tests.
 type TestStack struct {
 	InterfacesMap     map[int32]Interface
@@ -85,4 +87,9 @@ func (s *TestStack) SetTCPSACKEnabled(enabled bool) error {
 // Statistics implements inet.Stack.Statistics.
 func (s *TestStack) Statistics(stat interface{}, arg string) error {
 	return nil
+}
+
+// IPTables returns the stack's iptables.
+func (s *TestStack) IPTables() (iptables.IPTables, error) {
+	return iptables.IPTables{}, nil
 }

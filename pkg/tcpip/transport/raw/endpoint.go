@@ -484,7 +484,7 @@ func (ep *endpoint) Readiness(mask waiter.EventMask) waiter.EventMask {
 
 // SetSockOpt implements tcpip.Endpoint.SetSockOpt.
 func (ep *endpoint) SetSockOpt(opt interface{}) *tcpip.Error {
-	return nil
+	return tcpip.ErrUnknownProtocolOption
 }
 
 // GetSockOptInt implements tcpip.Endpoint.GetSockOptInt.
