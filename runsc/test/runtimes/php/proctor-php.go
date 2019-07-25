@@ -16,53 +16,28 @@
 package main
 
 import (
-	"flag"
 	"fmt"
-	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+
+	"gvisor.dev/gvisor/runsc/test/runtimes/common"
 )
 
 var (
-	list    = flag.Bool("list", false, "list all available tests")
-	test    = flag.String("test", "", "run a single test from the list of available tests")
-	version = flag.Bool("v", false, "print out the version of node that is installed")
-
 	dir       = os.Getenv("LANG_DIR")
 	testRegEx = regexp.MustCompile(`^.+\.phpt$`)
 )
 
-func main() {
-	flag.Parse()
-
-	if *list && *test != "" {
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-	if *list {
-		tests, err := listTests()
-		if err != nil {
-			log.Fatalf("Failed to list tests: %v", err)
-		}
-		for _, test := range tests {
-			fmt.Println(test)
-		}
-		return
-	}
-	if *version {
-		fmt.Println("PHP version: ", os.Getenv("LANG_VER"), " is installed.")
-		return
-	}
-	if *test != "" {
-		runTest(*test)
-		return
-	}
-	runAllTests()
+type phpRunner struct {
 }
 
-func listTests() ([]string, error) {
+func main() {
+	p := phpRunner{}
+	common.LaunchFunc(p)
+}
+
+func (p phpRunner) ListTests() ([]string, error) {
 	var testSlice []string
 
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
@@ -87,21 +62,9 @@ func listTests() ([]string, error) {
 	return testSlice, nil
 }
 
-func runTest(test string) {
-	args := []string{"test", "TESTS=" + test}
-	cmd := exec.Command("make", args...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("Failed to run: %v", err)
-	}
-}
-
-func runAllTests() {
-	tests, err := listTests()
-	if err != nil {
-		log.Fatalf("Failed to list tests: %v", err)
-	}
-	for _, test := range tests {
-		runTest(test)
-	}
+func (p phpRunner) RunTest(test string) {
+	common.TestExec(
+		"make",
+		[]string{"test", "TESTS=" + test},
+	)
 }

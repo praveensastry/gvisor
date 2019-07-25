@@ -21,7 +21,6 @@
 package main
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -29,14 +28,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"gvisor.dev/gvisor/runsc/test/runtimes/common"
 )
 
 var (
-	list    = flag.Bool("list", false, "list all available tests")
-	test    = flag.String("test", "", "run a single test from the list of available tests")
-	version = flag.Bool("v", false, "print out the version of node that is installed")
-
 	dir       = os.Getenv("LANG_DIR")
+	goBin     = filepath.Join(dir, "bin/go")
 	testDir   = filepath.Join(dir, "test")
 	testRegEx = regexp.MustCompile(`^.+\.go$`)
 
@@ -45,35 +43,15 @@ var (
 	exclDirs = regexp.MustCompile(`^.+\/(bench|stress)\/.+$|^.+\.dir.+$`)
 )
 
-func main() {
-	flag.Parse()
-
-	if *list && *test != "" {
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-	if *list {
-		tests, err := listTests()
-		if err != nil {
-			log.Fatalf("Failed to list tests: %v", err)
-		}
-		for _, test := range tests {
-			fmt.Println(test)
-		}
-		return
-	}
-	if *version {
-		fmt.Println("Go version: ", os.Getenv("LANG_VER"), "  is installed.")
-		return
-	}
-	if *test != "" {
-		runTest(*test)
-		return
-	}
-	runAllTests()
+type goRunner struct {
 }
 
-func listTests() ([]string, error) {
+func main() {
+	g := goRunner{}
+	common.LaunchFunc(g)
+}
+
+func (g goRunner) ListTests() ([]string, error) {
 	// Go tool dist test tests.
 	args := []string{"tool", "dist", "test", "-list"}
 	cmd := exec.Command(filepath.Join(dir, "bin/go"), args...)
@@ -112,17 +90,7 @@ func listTests() ([]string, error) {
 	return testSlice, nil
 }
 
-func runTest(test string) {
-	toolArgs := []string{
-		"tool",
-		"dist",
-		"test",
-	}
-	diskArgs := []string{
-		"run",
-		"run.go",
-		"-v",
-	}
+func (g goRunner) RunTest(test string) {
 	// Check if test exists on disk by searching for file of the same name.
 	// This will determine whether or not it is a Go test on disk.
 	if _, err := os.Stat(test); err == nil {
@@ -130,8 +98,7 @@ func runTest(test string) {
 		if err != nil {
 			log.Fatalf("Failed to get rel path: %v", err)
 		}
-		diskArgs = append(diskArgs, "--", relPath)
-		cmd := exec.Command(filepath.Join(dir, "bin/go"), diskArgs...)
+		cmd := exec.Command(goBin, "run", "run.go", "-v", "--", relPath)
 		cmd.Dir = testDir
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {
@@ -139,23 +106,11 @@ func runTest(test string) {
 		}
 	} else if os.IsNotExist(err) {
 		// File was not found, try running as Go tool test.
-		toolArgs = append(toolArgs, "-run", test)
-		cmd := exec.Command(filepath.Join(dir, "bin/go"), toolArgs...)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			log.Fatalf("Failed to run: %v", err)
-		}
+		common.TestExec(
+			goBin,
+			[]string{"tool", "dist", "test", "-run", test},
+		)
 	} else {
 		log.Fatalf("Error searching for test: %v", err)
-	}
-}
-
-func runAllTests() {
-	tests, err := listTests()
-	if err != nil {
-		log.Fatalf("Failed to list tests: %v", err)
-	}
-	for _, test := range tests {
-		runTest(test)
 	}
 }

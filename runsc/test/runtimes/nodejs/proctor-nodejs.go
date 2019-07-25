@@ -16,53 +16,28 @@
 package main
 
 import (
-	"flag"
 	"fmt"
-	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+
+	"gvisor.dev/gvisor/runsc/test/runtimes/common"
 )
 
 var (
-	list    = flag.Bool("list", false, "list all available tests")
-	test    = flag.String("test", "", "run a single test from the list of available tests")
-	version = flag.Bool("v", false, "print out the version of node that is installed")
-
 	dir       = os.Getenv("LANG_DIR")
 	testRegEx = regexp.MustCompile(`^test-.+\.js$`)
 )
 
-func main() {
-	flag.Parse()
-
-	if *list && *test != "" {
-		flag.PrintDefaults()
-		os.Exit(1)
-	}
-	if *list {
-		tests, err := listTests()
-		if err != nil {
-			log.Fatalf("Failed to list tests: %v", err)
-		}
-		for _, test := range tests {
-			fmt.Println(test)
-		}
-		return
-	}
-	if *version {
-		fmt.Println("Node.js version: ", os.Getenv("LANG_VER"), " is installed.")
-		return
-	}
-	if *test != "" {
-		runTest(*test)
-		return
-	}
-	runAllTests()
+type nodejsRunner struct {
 }
 
-func listTests() ([]string, error) {
+func main() {
+	n := nodejsRunner{}
+	common.LaunchFunc(n)
+}
+
+func (n nodejsRunner) ListTests() ([]string, error) {
 	var testSlice []string
 	root := filepath.Join(dir, "test")
 
@@ -88,21 +63,9 @@ func listTests() ([]string, error) {
 	return testSlice, nil
 }
 
-func runTest(test string) {
-	args := []string{filepath.Join(dir, "tools", "test.py"), test}
-	cmd := exec.Command("/usr/bin/python", args...)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		log.Fatalf("Failed to run: %v", err)
-	}
-}
-
-func runAllTests() {
-	tests, err := listTests()
-	if err != nil {
-		log.Fatalf("Failed to list tests: %v", err)
-	}
-	for _, test := range tests {
-		runTest(test)
-	}
+func (n nodejsRunner) RunTest(test string) {
+	common.TestExec(
+		"/usr/bin/python",
+		[]string{filepath.Join(dir, "tools", "test.py"), test},
+	)
 }
