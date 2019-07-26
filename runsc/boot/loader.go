@@ -20,6 +20,7 @@ import (
 	mrand "math/rand"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -492,6 +493,18 @@ func (l *Loader) run() error {
 	ep, ok := l.processes[eid]
 	if !ok {
 		return fmt.Errorf("trying to start deleted container %q", l.sandboxID)
+	}
+
+	// Set the sandbox oom_score_adj
+	if l.spec.Process.OOMScoreAdj != nil {
+		scoreFd, err := os.OpenFile("/proc/self/oom_score_adj", os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Errorf("opening oom_score_adj: %v", err)
+		}
+		_, err = scoreFd.WriteString(strconv.Itoa(*l.spec.Process.OOMScoreAdj))
+		if err != nil {
+			return fmt.Errorf("writing oom_score_adj: %v", err)
+		}
 	}
 
 	// If we are restoring, we do not want to create a process.
