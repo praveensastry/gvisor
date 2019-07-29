@@ -111,15 +111,16 @@ func copyOutEvents(t *kernel.Task, addr usermem.Addr, e []epoll.Event) error {
 		return syserror.EFAULT
 	}
 
-	b := t.CopyScratchBuffer(itemLen)
+	buffLen := len(e) * itemLen
+	b := t.CopyScratchBuffer(buffLen)
 	for i := range e {
-		usermem.ByteOrder.PutUint32(b[0:], e[i].Events)
-		usermem.ByteOrder.PutUint32(b[4:], uint32(e[i].Data[0]))
-		usermem.ByteOrder.PutUint32(b[8:], uint32(e[i].Data[1]))
-		if _, err := t.CopyOutBytes(addr, b); err != nil {
-			return err
-		}
-		addr += itemLen
+		usermem.ByteOrder.PutUint32(b[i*12:], e[i].Events)
+		usermem.ByteOrder.PutUint32(b[i*12+4:], uint32(e[i].Data[0]))
+		usermem.ByteOrder.PutUint32(b[i*12+8:], uint32(e[i].Data[1]))
+	}
+
+	if _, err := t.CopyOutBytes(addr, b); err != nil {
+		return err
 	}
 
 	return nil
