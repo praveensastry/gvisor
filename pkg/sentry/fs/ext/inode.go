@@ -18,12 +18,26 @@ import (
 	"io"
 	"sync/atomic"
 
-	"gvisor.dev/gvisor/pkg/binary"
+	"gvisor.dev/gvisor/pkg/abi/linux"
+	"gvisor.dev/gvisor/pkg/sentry/context"
 	"gvisor.dev/gvisor/pkg/sentry/fs/ext/disklayout"
 	"gvisor.dev/gvisor/pkg/syserror"
 )
 
 // inode represents an ext inode.
+//
+// inode uses the same inheritance pattern that pkg/sentry/vfs structures use.
+// This has been done to increase memory locality.
+//
+// Implementations:
+//    inode --
+//           |-- pipe
+//           |-- dir
+//           |-- symlink
+//           |-- regular--
+//                       |-- extent file
+//                       |-- block map file
+//                       |-- inline file
 type inode struct {
 	// refs is a reference count. refs is accessed using atomic memory operations.
 	refs int64
@@ -32,12 +46,18 @@ type inode struct {
 	// identify inodes within the ext filesystem.
 	inodeNum uint32
 
+	// dev is the io.ReaderAt for the underlying device. Same as filesystem.dev.
+	dev io.ReaderAt
+
+	// blkSize is the fs data block size. Same as filesystem.sb.BlockSize().
+	blkSize uint64
+
 	// diskInode gives us access to the inode struct on disk. Immutable.
 	diskInode disklayout.Inode
 
-	// root is the root extent node. This lives in the 60 byte diskInode.Blocks().
-	// Immutable. Nil if the inode does not use extents.
-	root *disklayout.ExtentNode
+	// This is immutable. The first field of the implementations must have inode
+	// as the first field to ensure temporality.
+	impl interface{}
 }
 
 // incRef increments the inode ref count.
@@ -61,7 +81,7 @@ func (in *inode) tryIncRef() bool {
 // decRef decrements the inode ref count and releases the inode resources if
 // the ref count hits 0.
 //
-// Preconditions: Must have locked fs.mu.
+// Precondition: Must have locked fs.mu.
 func (in *inode) decRef(fs *filesystem) {
 	if refs := atomic.AddInt64(&in.refs, -1); refs == 0 {
 		delete(fs.inodeCache, in.inodeNum)
@@ -72,37 +92,59 @@ func (in *inode) decRef(fs *filesystem) {
 
 // newInode is the inode constructor. Reads the inode off disk. Identifies
 // inodes based on the absolute inode number on disk.
-//
-// Preconditions: Must hold the mutex of the filesystem containing dev.
-func newInode(dev io.ReadSeeker, sb disklayout.SuperBlock, bgs []disklayout.BlockGroup, inodeNum uint32) (*inode, error) {
+func newInode(ctx context.Context, fs *filesystem, inodeNum uint32) (*inode, error) {
 	if inodeNum == 0 {
 		panic("inode number 0 on ext filesystems is not possible")
 	}
 
-	in := &inode{refs: 1, inodeNum: inodeNum}
-	inodeRecordSize := sb.InodeSize()
+	inodeRecordSize := fs.sb.InodeSize()
+	var diskInode disklayout.Inode
 	if inodeRecordSize == disklayout.OldInodeSize {
-		in.diskInode = &disklayout.InodeOld{}
+		diskInode = &disklayout.InodeOld{}
 	} else {
-		in.diskInode = &disklayout.InodeNew{}
+		diskInode = &disklayout.InodeNew{}
 	}
 
 	// Calculate where the inode is actually placed.
-	inodesPerGrp := sb.InodesPerGroup()
-	blkSize := sb.BlockSize()
-	inodeTableOff := bgs[getBGNum(inodeNum, inodesPerGrp)].InodeTable() * blkSize
+	inodesPerGrp := fs.sb.InodesPerGroup()
+	blkSize := fs.sb.BlockSize()
+	inodeTableOff := fs.bgs[getBGNum(inodeNum, inodesPerGrp)].InodeTable() * blkSize
 	inodeOff := inodeTableOff + uint64(uint32(inodeRecordSize)*getBGOff(inodeNum, inodesPerGrp))
 
-	// Read it from disk and figure out which type of inode this is.
-	if err := readFromDisk(dev, int64(inodeOff), in.diskInode); err != nil {
+	if err := readFromDisk(fs.dev, int64(inodeOff), diskInode); err != nil {
 		return nil, err
 	}
 
-	if in.diskInode.Flags().Extents {
-		in.buildExtTree(dev, blkSize)
+	// Build the inode based on its type.
+	inode := inode{
+		refs:      1,
+		inodeNum:  inodeNum,
+		dev:       fs.dev,
+		blkSize:   blkSize,
+		diskInode: diskInode,
 	}
 
-	return in, nil
+	switch diskInode.Mode().FileType() {
+	case linux.ModeSymlink:
+		f, err := newSymlink(inode)
+		if err != nil {
+			return nil, err
+		}
+		return &f.inode, nil
+	case linux.ModeRegular:
+		f, err := newRegularFile(inode)
+		if err != nil {
+			return nil, err
+		}
+		return &f.inode, nil
+	case linux.ModeDirectory:
+		return &newDirectroy(inode).inode, nil
+	case linux.ModeNamedPipe:
+		return &newNamedPipe(ctx, inode).inode, nil
+	default:
+		// TODO(b/134676337): return appropriate errors for sockets and devices.
+		return nil, syserror.EINVAL
+	}
 }
 
 // getBGNum returns the block group number that a given inode belongs to.
@@ -114,96 +156,4 @@ func getBGNum(inodeNum uint32, inodesPerGrp uint32) uint32 {
 // group's inode table, i.e. the index of the inode in the inode table.
 func getBGOff(inodeNum uint32, inodesPerGrp uint32) uint32 {
 	return (inodeNum - 1) % inodesPerGrp
-}
-
-// buildExtTree builds the extent tree by reading it from disk by doing
-// running a simple DFS. It first reads the root node from the inode struct in
-// memory. Then it recursively builds the rest of the tree by reading it off
-// disk.
-//
-// Preconditions:
-//   - Must hold the mutex of the filesystem containing dev.
-//   - Inode flag InExtents must be set.
-func (in *inode) buildExtTree(dev io.ReadSeeker, blkSize uint64) error {
-	rootNodeData := in.diskInode.Data()
-
-	var rootHeader disklayout.ExtentHeader
-	binary.Unmarshal(rootNodeData[:disklayout.ExtentStructsSize], binary.LittleEndian, &rootHeader)
-
-	// Root node can not have more than 4 entries: 60 bytes = 1 header + 4 entries.
-	if rootHeader.NumEntries > 4 {
-		// read(2) specifies that EINVAL should be returned if the file is unsuitable
-		// for reading.
-		return syserror.EINVAL
-	}
-
-	rootEntries := make([]disklayout.ExtentEntryPair, rootHeader.NumEntries)
-	for i, off := uint16(0), disklayout.ExtentStructsSize; i < rootHeader.NumEntries; i, off = i+1, off+disklayout.ExtentStructsSize {
-		var curEntry disklayout.ExtentEntry
-		if rootHeader.Height == 0 {
-			// Leaf node.
-			curEntry = &disklayout.Extent{}
-		} else {
-			// Internal node.
-			curEntry = &disklayout.ExtentIdx{}
-		}
-		binary.Unmarshal(rootNodeData[off:off+disklayout.ExtentStructsSize], binary.LittleEndian, curEntry)
-		rootEntries[i].Entry = curEntry
-	}
-
-	// If this node is internal, perform DFS.
-	if rootHeader.Height > 0 {
-		for i := uint16(0); i < rootHeader.NumEntries; i++ {
-			var err error
-			if rootEntries[i].Node, err = buildExtTreeFromDisk(dev, rootEntries[i].Entry, blkSize); err != nil {
-				return err
-			}
-		}
-	}
-
-	in.root = &disklayout.ExtentNode{rootHeader, rootEntries}
-	return nil
-}
-
-// buildExtTreeFromDisk reads the extent tree nodes from disk and recursively
-// builds the tree. Performs a simple DFS. It returns the ExtentNode pointed to
-// by the ExtentEntry.
-//
-// Preconditions: Must hold the mutex of the filesystem containing dev.
-func buildExtTreeFromDisk(dev io.ReadSeeker, entry disklayout.ExtentEntry, blkSize uint64) (*disklayout.ExtentNode, error) {
-	var header disklayout.ExtentHeader
-	off := entry.PhysicalBlock() * blkSize
-	if err := readFromDisk(dev, int64(off), &header); err != nil {
-		return nil, err
-	}
-
-	entries := make([]disklayout.ExtentEntryPair, header.NumEntries)
-	for i, off := uint16(0), off+disklayout.ExtentStructsSize; i < header.NumEntries; i, off = i+1, off+disklayout.ExtentStructsSize {
-		var curEntry disklayout.ExtentEntry
-		if header.Height == 0 {
-			// Leaf node.
-			curEntry = &disklayout.Extent{}
-		} else {
-			// Internal node.
-			curEntry = &disklayout.ExtentIdx{}
-		}
-
-		if err := readFromDisk(dev, int64(off), curEntry); err != nil {
-			return nil, err
-		}
-		entries[i].Entry = curEntry
-	}
-
-	// If this node is internal, perform DFS.
-	if header.Height > 0 {
-		for i := uint16(0); i < header.NumEntries; i++ {
-			var err error
-			entries[i].Node, err = buildExtTreeFromDisk(dev, entries[i].Entry, blkSize)
-			if err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	return &disklayout.ExtentNode{header, entries}, nil
 }
